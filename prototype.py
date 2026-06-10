@@ -20,7 +20,7 @@ from reportlab.graphics.charts.legends import Legend
 # 1. アプリの基本設定
 # ==========================================
 st.set_page_config(page_title="Football Scouting AI", layout="wide")
-st.title("🏈 Football Scouting AI (Hudlエディタ)")
+st.title("🏈 アメフト 試合スタッツ自動集計アプリ")
 st.markdown("PDFから抽出したデータを**自由に変形・修正・時間フィルター・円グラフ付きPDF出力**できます。")
 
 def time_to_seconds(time_str):
@@ -36,7 +36,7 @@ def seconds_to_time(seconds):
     return f"{mins:02d}:{secs:02d}"
 
 # ==========================================
-# 2. PDF自動解析ロジック
+# 2. PDF自動解析ロジック（重複防止版）
 # ==========================================
 def parse_football_pdf_fully(pdf_file):
     play_data, stats_data_list = [], []
@@ -85,13 +85,28 @@ def parse_football_pdf_fully(pdf_file):
                             if "チーム名" not in team_name and "SCORE" not in team_name.upper():
                                 is_duplicate = any(d["Qtr"] == current_qtr and d["チーム名"] == team_name for d in stats_data_list)
                                 if not is_duplicate:
+                                    # 💡 全ての項目（1stDown内訳、サードダウン成功率など）を漏れなく保存
                                     stats_data_list.append({
-                                        "Qtr": current_qtr, "チーム名": team_name, "得点 (Score)": int(sm.group(2)),
-                                        "攻撃時間 (Time Poss)": sm.group(3), "攻撃秒数": time_to_seconds(sm.group(3)),
-                                        "1stDown(合計)": int(sm.group(7))
+                                        "Qtr": current_qtr, 
+                                        "チーム名": team_name, 
+                                        "得点 (Score)": int(sm.group(2)),
+                                        "攻撃時間 (Time Poss)": sm.group(3), 
+                                        "攻撃秒数": time_to_seconds(sm.group(3)),
+                                        "1stDown(ラン)": int(sm.group(4)),
+                                        "1stDown(パス)": int(sm.group(5)),
+                                        "1stDown(反則)": int(sm.group(6)),
+                                        "1stDown(合計)": int(sm.group(7)),
+                                        "3rdDown成功率": sm.group(8).strip(),
+                                        "4thDown成功率": sm.group(9).strip()
                                     })
                         scan_idx += 1
-    return pd.DataFrame(play_data), pd.DataFrame(stats_data_list)
+                        
+    df_plays_out = pd.DataFrame(play_data)
+    df_stats_out = pd.DataFrame(stats_data_list)
+    if not df_stats_out.empty:
+        df_stats_out = df_stats_out.drop_duplicates(subset=["Qtr", "チーム名"], keep="first")
+        
+    return df_plays_out, df_stats_out
 
 # ==========================================
 # 4. 日本語PDF生成関数
@@ -196,7 +211,7 @@ if uploaded_file:
         with map_cols[idx]:
             st.session_state.team_mapping[t_name] = st.text_input(f"「{t_name}」の略称", value=old_abbr, max_chars=2, key=f"abbr_{t_name}").upper()
 
-    tab1, tab2 = st.tabs(["📈 Hudl風 プレイ編集＆分析", "📊 チームスタッツ分析"])
+    tab1, tab2 = st.tabs(["📈プレイ集計", "📊 チームスタッツ"])
     
     with tab1:
         st.header("🏈 プレイライブラリ（直接編集可能）")
@@ -226,15 +241,16 @@ if uploaded_file:
         st.divider()
         
         # ==========================================
-        # フィルターコントロール（左サイドバー）
+        # フィルターコントロール（左サイドバー）- タブの外に配置
         # ==========================================
-        st.sidebar.header("🔍 スカウティング フィルター")
+        st.sidebar.header("🔍データ絞り込みフィルター")
         
         team_options = sorted(list(df_plays["PosTeam"].unique())) if "PosTeam" in df_plays.columns else []
         selected_team = st.sidebar.selectbox("分析対象の攻撃チーム", options=team_options)
         
-        qtr_options = list(df_plays["Qtr"].unique()) if "Qtr" in df_plays.columns else ["1Q", "2Q", "3Q", "4Q"]
-        qtr_filter = st.sidebar.multiselect("Qtr", options=qtr_options, default=qtr_options)
+        # 💡 ここで選択された qtr_filter が、プレイ分析とチームスタッツの両方に連動します
+        qtr_options = ["1Q", "2Q", "3Q", "4Q"]
+        qtr_filter = st.sidebar.multiselect("Qtr (クォーター選択)", options=qtr_options, default=qtr_options)
         
         down_options = sorted(list(df_plays["Down"].unique())) if "Down" in df_plays.columns else [1, 2, 3, 4]
         down_filter = st.sidebar.multiselect("Down", options=down_options, default=down_options)
@@ -247,7 +263,7 @@ if uploaded_file:
         pt_default = [opt for opt in pt_options if opt in ["RUN", "PASS"]]
         play_type_filter = st.sidebar.multiselect("PlayType", options=pt_options, default=pt_default)
         
-        # --- 残りヤード数（Distance）セクションの改良 ---
+        # --- 残りヤード数（Distance）セクション ---
         st.sidebar.markdown("---")
         st.sidebar.markdown("**📐 残りヤード数（Distance）**")
         
@@ -261,7 +277,6 @@ if uploaded_file:
         use_custom_slider = st.sidebar.checkbox("個別設定を有効にする", value=False)
         dist_slider_range = st.sidebar.slider("ヤード範囲(yd)", min_value=1, max_value=30, value=(1, 30), disabled=not use_custom_slider)
         
-        # 右端が30のときの説明文分岐
         if use_custom_slider:
             if dist_slider_range[1] == 30:
                 st.sidebar.caption(f"🎯 現在： **{dist_slider_range[0]}yd 〜 30yd以上すべて** を抽出中")
@@ -306,21 +321,17 @@ if uploaded_file:
         )
         if "PosTeam" in df_plays.columns: mask = mask & (df_plays["PosTeam"] == selected_team)
 
-        # 残りヤード数の数値変換
         def get_int_value(x):
             try: return int(x)
             except: return None
         temp_dists = df_plays["Distance"].apply(get_int_value)
 
-        # 1. 個別設定スライダーがONのときの条件
         if use_custom_slider:
             if dist_slider_range[1] == 30:
-                # 右端が30のときは、30以上の数値すべてを対象にする
                 mask = mask & ((temp_dists >= dist_slider_range[0]) | temp_dists.isna())
             else:
                 mask = mask & (temp_dists.between(dist_slider_range[0], dist_slider_range[1]) | temp_dists.isna())
 
-        # 2. プリセット（チェックボックス）の条件（「すべて」にチェックがない場合のみ適用）
         if not chk_all:
             yard_masks = []
             if chk_short: yard_masks.append(temp_dists.between(1, 3))
@@ -341,33 +352,32 @@ if uploaded_file:
         # ==========================================
         # メイン画面（右側）への描画
         # ==========================================
-        st.header("📊 リアルタイム傾向分析")
+        st.header("📊 RUN/PASS傾向分析")
         
         if not filtered_df.empty:
             res_c1, res_c2 = st.columns([1, 2])
             with res_c1:
                 if not analysis_df.empty:
-                    fig = px.pie(
+                   fig = px.pie(
                         analysis_df, 
                         names="PlayType", 
                         title=f"{selected_team} RUN vs PASS 比率", 
                         color="PlayType", 
-                        color_discrete_map={"RUN": "#1e3a8a", "PASS": "#60a5fa"}
+                        color_discrete_map={"RUN": "#1e3a8a", "PASS": "#60a5fa"},
+                        category_orders={"PlayType": ["RUN", "PASS"]}
                     )
-                    fig.update_traces(
+                   fig.update_traces(
                         textinfo='percent+value', 
                         hovertemplate="<b>%{label}</b><br>割合: %{percent}<br>回数: %{value}回<extra></extra>"
                     )
-                    st.plotly_chart(fig, use_container_width=True)
+                   st.plotly_chart(fig, use_container_width=True)
             with res_c2:
                 st.subheader("抽出プレイ詳細")
                 st.dataframe(filtered_df[["Qtr", "Time", "Down", "Distance", "FieldSide", "Yardline", "Hash", "PlayType", "RawText"]], use_container_width=True)
             
             st.divider()
-            # 🖨️ PDF出力ボタン
             st.subheader("🖨️ スカウティングレポート(PDF)の保存")
             
-            # PDFに渡す条件テキストの構築
             if use_custom_slider:
                 dist_txt = f"{dist_slider_range[0]}-30+yd" if dist_slider_range[1] == 30 else f"{dist_slider_range[0]}-{dist_slider_range[1]}yd"
             else:
@@ -381,7 +391,76 @@ if uploaded_file:
             st.warning("左側のサイドバーで選択された条件に該当するデータがありません。条件を緩めてください。")
 
     with tab2:
-        st.header("📊 チームスタッツ集計")
-        st.table(st.session_state.df_stats.set_index("チーム名") if not st.session_state.df_stats.empty else pd.DataFrame())
-else:
-    st.info("🏈 PDFファイルをドロップして解析を開始してください。")
+        st.header("📊 チームスタッツ集計（Qtr選択のフィルターのみ反映）")
+        
+        if not st.session_state.df_stats.empty:
+            raw_stats = st.session_state.df_stats.copy()
+            raw_stats.columns = raw_stats.columns.str.strip()
+            
+            # 元データの段階での重複を確実に排除
+            unique_raw_stats = raw_stats.drop_duplicates(subset=["Qtr", "チーム名"], keep="first")
+            # サイドバーの qtr_filter と連動
+            filtered_stats = unique_raw_stats[unique_raw_stats["Qtr"].isin(qtr_filter)].copy()
+            
+            if not filtered_stats.empty:
+                aggregated_data = []
+                for team_name, group in filtered_stats.groupby("チーム名"):
+                    
+                    def get_safe_sum(col_name):
+                        if col_name in group.columns:
+                            return pd.to_numeric(group[col_name], errors='coerce').fillna(0).sum()
+                        return 0
+                    
+                    score_sum = int(get_safe_sum("得点 (Score)"))
+                    sec_sum = int(get_safe_sum("攻撃秒数"))
+                    fd_run = int(get_safe_sum("1stDown(ラン)"))
+                    fd_pass = int(get_safe_sum("1stDown(パス)"))
+                    fd_pen = int(get_safe_sum("1stDown(反則)"))
+                    fd_tot = int(get_safe_sum("1stDown(合計)"))
+                    
+                    # 計算値が元の合計を上回る場合の安全弁
+                    if (fd_run + fd_pass + fd_pen) > fd_tot:
+                        fd_tot = fd_run + fd_pass + fd_pen
+                    
+                    pos_time_str = f"{int(sec_sum // 60)}:{int(sec_sum % 60):02d}"
+                    
+                    def sum_fraction_column(col_name):
+                        succ_total, att_total = 0, 0
+                        if col_name in group.columns:
+                            for val in group[col_name].dropna().astype(str):
+                                if '/' not in val: continue
+                                match = re.search(r'(\d+)\s*/\s*(\d+)', val)
+                                if match:
+                                    succ_total += int(match.group(1))
+                                    att_total += int(match.group(2))
+                        return f"{succ_total}/{att_total}"
+                    
+                    third_down_str = sum_fraction_column("3rdDown成功率")
+                    fourth_down_str = sum_fraction_column("4thDown成功率")
+                    
+                    qtrs_included = ", ".join(sorted(list(group["Qtr"].unique())))
+                    
+                    aggregated_data.append({
+                        "選択されたQtr": qtrs_included,
+                        "チーム名": team_name,
+                        "得点 (Score)": score_sum,
+                        "攻撃時間 (Time Poss)": pos_time_str,
+                        "攻撃秒数": sec_sum,
+                        "1stDown(ラン)": fd_run,
+                        "1stDown(パス)": fd_pass,
+                        "1stDown(反則)": fd_pen,
+                        "1stDown(合計)": fd_tot,
+                        "3rdDown成功率": third_down_str,
+                        "4thDown成功率": fourth_down_str
+                    })
+                
+                df_aggregated = pd.DataFrame(aggregated_data)
+                display_cols = ["選択されたQtr", "得点 (Score)", "攻撃時間 (Time Poss)", "攻撃秒数", 
+                                "1stDown(ラン)", "1stDown(パス)", "1stDown(反則)", "1stDown(合計)", 
+                                "3rdDown成功率", "4thDown成功率"]
+                
+                st.table(df_aggregated[["チーム名"] + display_cols].set_index("チーム名"))
+            else:
+                st.warning("選択されたQtrに該当するデータがありません。")
+        else:
+            st.info("PDFファイルをドロップして解析を開始してください。")
