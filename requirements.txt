@@ -3,3 +3,4 @@ pdfplumber
 pandas
 plotly
 reportlab
+openpyxl
